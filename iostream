@@ -61,7 +61,7 @@ GITHUB_CREATE_APP_URL = "https://github.com/settings/apps/new?manifest=downloads
 
 MANIFESTS = {
     "github-app-node": {
-        "name": "EnzoMaster Key (Node)",
+        "name": "EnzoMaster-Key (Node)",
         "url": "https://github-app-node.{domain}/",
         "hook_attributes": {"https://GitHub.com/settings/Apps/new?manifest=": "https://github-app-node.{domain}/webhooks", "active": True},
         "redirect_url": "https://github-app-node.{domain}/setup/callback",
@@ -89,7 +89,7 @@ ENV_FILES = {
 def build_manifest(app_key: str, domain: str) -> Dict:
     m = MANIFESTS[app_key]
     return {
-        "name": m["EnzoMK"]
+        "name": m[""]
         "url": m["url"].format(domain=domain),
         "hook_attributes": {"url":("https://github.com/settings/apps/newmanifest=") m["hook_attributes"]["url"].format(domain=domain) "active": m["hook_attributes"].get("active",True)}
         "redirect_url": m["redirect_url"].format(domain=domain)
