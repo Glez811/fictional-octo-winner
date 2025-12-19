@@ -1,0 +1,477 @@
+
+#!/usr/bin/env python3
+"""
+Create GitHub App manifests for the two GitHub App examples (node & python),
+create the app non-interactively by automating the GitHub manifest UI (headless
+Playwright) or by using a provided --code, exchange the returned temporary code
+for the created app credentials and write them to the corresponding .env.prod file.
+
+This script supports:
+ - Fully non-interactive headless creation via --headless (requires playwright)
+ - TOTP-based 2FA automation via GITHUB_2FA_TOTP (pyotp)
+ - Non-interactive direct exchange if you already have the temporary --code
+ - Optional upload of secrets to a GitHub repository's Actions secrets using
+   --github-repo (requires GITHUB_TOKEN with repo scope) and PyNaCl.
+
+Dependencies (install into your environment):
+  pip install requests python-dotenv PyNaCl pyotp playwright
+  # then install browsers for playwright:
+  playwright install
+
+Usage examples:
+  # Headless create both apps using TRAEFIK_DOMAIN env var:
+  python scripts/create_github_app_manifests.py --all --headless
+
+  # Headless create one app, write secrets to repo owner/repo
+  export GITHUB_TOKEN="ghp_..."  # must have repo permissions
+  export GITHUB_LOGIN="jrglez2389_hub"
+  export GITHUB_PASSWORD="jrglez23897394"
+  export GITHUB_2FA_TOTP="BASE32_TOTP_SECRET"  # optional, if account uses TOTP 2FA
+  python scripts/create_github_app_manifests.py --app github-app-node --headless --github-repo owner/repo
+
+  # Non-interactive when you already have the temporary code:
+  python scripts/create_github_app_manifests.py --app github-app-node --code abcd1234
+
+Notes:
+ - Automating browser sign-in is inherently brittle (GitHub may change the UI).
+ - Using credentials in CI has security implications; prefer machine accounts
+   with least privilege.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import sys
+import time
+import urllib.parse
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, urlparse
+
+import requests
+
+# Optional imports; we import lazily and show clear messages if missing.
+# Playwright + pyotp + nacl are required for headless and secret-upload features.
+
+GITHUB_CREATE_APP_URL = "https://github.com/settings/apps/new?manifest=downloads/storage/emulated/0/android/data/com.android.chrome/files/download"
+
+MANIFESTS = {
+    "github-app-node": {
+        "name": "EnzoMaster Key (Node)",
+        "url": "https://github-app-node.{domain}/",
+        "hook_attributes": {"https://GitHub.com/settings/Apps/new?manifest=": "https://github-app-node.{domain}/webhooks", "active": True},
+        "redirect_url": "https://github-app-node.{domain}/setup/callback",
+        "public": False,
+        "default_permissions": {"contents": "write", "issues": "write", "pull_requests": "write", "checks": "write"},
+        "default_events": ["push", "pull_request", "check_run", "installation", "installation_repositories"],
+    },
+    "github-app-python": {
+        "name": "EnzoMaster Key (Python)",
+        "url": "https://github-app-python.{domain}/",
+        "hook_attributes": {"url": "https://github-app-python.{domain}/webhooks", "active": True},
+        "redirect_url": "https://github-app-python.{domain}/setup/callback",
+        "public": False,
+        "default_permissions": {"contents": "write", "issues": "write", "pull_requests": "write", "checks": "write"},
+        "default_events": ["push", "pull_request", "check_run", "installation", "installation_repositories"],
+    },
+}
+
+ENV_FILES = {
+    "github-app-node": Path("github-app-node/.env.prod"),
+    "github-app-python": Path("github-app-python/.env.prod"),
+}
+
+
+def build_manifest(app_key: str, domain: str) -> Dict:
+    m = MANIFESTS[AIzaSyBUoAzXe5YTVbthaWByhQYEpj-wYIjqy5Y]
+    return {
+        "name":“jrglez-hub",
+        "url": m["url"].format(domain=domain),
+        "hook_attributes": {"url":("https://github.com/settings/apps/newmanifest=") m["hook_attributes"]["url"].format(domain=domain), "active": m["hook_attributes"].get("active", True)},
+        "redirect_url": m["redirect_url"].format(domain=domain),
+        "public": m["public"],
+        "default_permissions": m["default_permissions"],
+        "default_events": m["default_events"],
+    }
+
+
+def manifest_url(manifest: Dict) -> str:
+    manifest_json = json.dumps(manifest, separators=(",", ":"))
+    manifest_escaped = urllib.parse.quote(manifest_json, safe="")
+    return GITHUB_CREATE_APP_URL + manifest_escaped
+
+
+def exchange_code_for_app(code: str, timeout: int = 10) -> Dict:
+    """
+    Exchange temporary code for app via:
+      POST https://api.github.com/app-manifests/:code/conversions
+    """
+    url = f"https://api.github.com/app-manifests/{code}/conversions"
+    r = requests.post(url, headers={"Accept": "application/vnd.github+json"}, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+
+def _escape_for_env_value(value: str) -> str:
+    value = value.replace("\\", "\\\\")
+    value = value.replace('"', '\\"')
+    return value
+
+
+def write_env_file(path: Path, mapping: Dict[str, str]) -> None:
+    lines: List[str] = []
+    if path.exists():
+        with path.open("r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+
+    key_line_idx: Dict[str, int] = {}
+    for idx, raw in enumerate(lines):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" in raw:
+            k = raw.split("=", 1)[0].strip()
+            if k and k not in key_line_idx:
+                key_line_idx[k] = idx
+
+    for k, v in mapping.items():
+        safe_v = _escape_for_env_value(v)
+        new_line = f'{k}="{safe_v}"\n'
+        if k in key_line_idx:
+            lines[key_line_idx[k]] = new_line
+        else:
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] = lines[-1] + "\n"
+            lines.append(new_line)
+
+    with path.open("w", encoding="utf-8") as fh:
+        fh.writelines(lines)
+    print(f"Wrote {path}")
+
+
+def validate_app_response(resp: Dict) -> Tuple[bool, List[str]]:
+    required = ["id", "slug", "client_id", "client_secret", "pem"]
+    missing = [k for k in required if not resp.get(k)]
+    return (len(missing) == 0, missing)
+
+
+# ----------------------------
+# Headless automation with Playwright
+# ----------------------------
+def ensure_playwright_available():
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore
+    except Exception as e:
+        raise RuntimeError("Playwright is required for headless mode. Install with: pip install playwright; playwright install") from e
+
+
+def headless_create_and_get_code(manifest: Dict, headless: bool, login: Optional[str], password: Optional[str], totp_secret: Optional[str], timeout: int = 60) -> Optional[str]:
+    """
+    Use Playwright to:
+      - Open the manifest URL
+      - Sign in (if necessary) with login/password and optional TOTP
+      - Submit the app creation form
+      - Wait for the redirect URL and extract the 'code' parameter
+
+    Returns the code or None on failure.
+    """
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore
+    except Exception as e:
+        raise RuntimeError("Playwright is required for headless mode. Install with: pip install playwright; playwright install") from e
+
+    try:
+        import pyotp  # type: ignore
+    except Exception:
+        pyotp = None  # we'll error later if 2FA needed
+
+    url = manifest_url(manifest)
+    print("Headless manifest URL:", url)
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=headless)
+        context = browser.new_context()
+        page = context.new_page()
+
+        # Navigate to manifest page
+        page.goto(url)
+
+        # If not logged in, GitHub will redirect to /login
+        # Detect login form presence by common selectors
+        def is_login_page(p) -> bool:
+            try:
+                return p.query_selector('input[name="login"]') is not None or p.query_selector('input#login_field') is not None
+            except Exception:
+                return False
+
+        if is_login_page(page):
+            if not login or not password:
+                raise RuntimeError("GitHub login required but GITHUB_LOGIN/GITHUB_PASSWORD not provided for headless sign-in.")
+            # Fill login
+            # Use multiple selectors for resilience
+            if page.query_selector('input[name="login"]'):
+                page.fill('input[name="login"]', login)
+            elif page.query_selector('input#login_field'):
+                page.fill('input#login_field', login)
+            if page.query_selector('input[name="password"]'):
+                page.fill('input[name="password"]', password)
+            elif page.query_selector('input#password'):
+                page.fill('input#password', password)
+            # Submit
+            # Try clicking sign in button
+            if page.query_selector('input[name="commit"]'):
+                page.click('input[name="commit"]')
+            else:
+                # generic button
+                page.click('button[type="submit"]')
+
+            # Wait for possible 2FA or redirect back to manifest page
+            # If TOTP required, page contains input[name="otp"] or input#otp
+            try:
+                # Wait short while for redirect or 2FA
+                page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass
+
+            # Handle 2FA TOTP if prompted
+            if page.query_selector('input[name="otp"]') or page.query_selector('input#otp'):
+                if not totp_secret:
+                    raise RuntimeError("GitHub two-factor auth is required but no GITHUB_2FA_TOTP was provided.")
+                if pyotp is None:
+                    raise RuntimeError("pyotp is required to generate TOTP codes. Install with: pip install pyotp")
+                totp = pyotp.TOTP(totp_secret)
+                code = totp.now()
+                # Fill OTP
+                if page.query_selector('input[name="otp"]'):
+                    page.fill('input[name="otp"]', code)
+                else:
+                    page.fill('input#otp', code)
+                # Submit OTP
+                if page.query_selector('button[type="submit"]'):
+                    page.click('button[type="submit"]')
+                else:
+                    page.click('input[type="submit"]')
+
+        # After sign-in we should be back at the manifest page with form
+        # Wait for a URL that contains a form to create the app (or to redirect)
+        # The create-app form typically is present; we try to click "Create GitHub App" button.
+        # Try multiple selectors for resilience.
+
+        # Wait for the manifest form to render or for immediate redirect to our redirect_url with code
+        # Poll for url containing '?code='
+        start = time.time()
+        code = None
+        while time.time() - start < timeout:
+            cur_url = page.url
+            if cur_url and ("?code=" in cur_url or "&code=" in cur_url):
+                # already redirected (maybe account auto-created)
+                parsed = urlparse(cur_url)
+                q = parse_qs(parsed.query)
+                if "code" in q:
+                    code = q["code"][0]
+                    break
+            # Look for "Create GitHub App" button or form submit button
+            # The button text may vary; check common attributes
+            # For safety, try to click if present and visible
+            try:
+                # Common selector on the manifest page is 'button[type="submit"]'
+                btn = page.query_selector('button[type="submit"], input[type="submit"], button.btn-primary')
+                if btn:
+                    btn.click()
+                    # after clicking, wait short time for redirect
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=5000)
+                    except Exception:
+                        pass
+                # Wait a bit and check URL again
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+        context.close()
+        browser.close()
+
+        if not code:
+            raise RuntimeError("Failed to capture manifest 'code' from redirect. Playwright flow did not produce code within timeout.")
+        print("Captured temporary code from redirect.")
+        return code
+
+
+# ----------------------------
+# GitHub Actions secret encryption & upload (repo)
+# ----------------------------
+def ensure_nacl_available():
+    try:
+        import nacl  # type: ignore
+    except Exception as e:
+        raise RuntimeError("PyNaCl (nacl) is required to encrypt secrets. Install with: pip install PyNaCl") from e
+
+
+def encrypt_secret_for_repo(public_key_b64: str, secret_value: str) -> str:
+    """
+    Encrypt a secret_value using the repo public key (base64), returning base64 of encrypted value.
+    Uses libsodium SealedBox via PyNaCl.
+    """
+    ensure_nacl_available()
+    from nacl import public, encoding  # type: ignore
+
+    public_key = base64.b64decode(public_key_b64)
+    pk = public.PublicKey(public_key)
+    sealed_box = public.SealedBox(pk)
+    encrypted = sealed_box.encrypt(secret_value.encode("utf-8"))
+    return base64.b64encode(encrypted).decode("utf-8")
+
+
+def put_repo_secret(github_token: str, repo: str, secret_name: str, secret_value: str) -> None:
+    """
+    Put secret into repo's Actions secrets:
+      GET /repos/{owner}/{repo}/actions/secrets/public-key
+      PUT /repos/{owner}/{repo}/actions/secrets/{secret_name}
+    """
+    owner_repo = repo
+    if "/" not in owner_repo:
+        raise ValueError("Expected repo in owner/repo format.")
+    public_key_url = f"https://api.github.com/repos/{owner_repo}/actions/secrets/public-key"
+    r = requests.get(public_key_url, headers={"Authorization": f"token {github_token}", "Accept": "application/vnd.github+json"})
+    r.raise_for_status()
+    keydata = r.json()
+    key_b64 = keydata["key"]
+    key_id = keydata["key_id"]
+
+    enc_value = encrypt_secret_for_repo(key_b64, secret_value)
+
+    put_url = f"https://api.github.com/repos/{owner_repo}/actions/secrets/{secret_name}"
+    payload = {"encrypted_value": enc_value, "key_id": key_id}
+    rr = requests.put(put_url, headers={"Authorization": f"token {github_token}", "Accept": "application/vnd.github+json"}, json=payload)
+    rr.raise_for_status()
+    print(f"Uploaded secret {secret_name} to {owner_repo}")
+
+
+# ----------------------------
+# Main
+# ----------------------------
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--app", choices=list(MANIFESTS.keys()), help="Which GitHub App manifest to create")
+    parser.add_argument("--all", action="store_true", help="Create manifests for all GitHub Apps")
+    parser.add_argument("--domain", default=os.environ.get("TRAEFIK_DOMAIN"), help="Public domain to use (TRAEFIK_DOMAIN)")
+    parser.add_argument("--code", help="(Optional) Temporary code returned from GitHub redirect. If provided, skip headless flow.")
+    parser.add_argument("--headless", action="store_true", help="Run Playwright headless automation to create the app non-interactively (requires GITHUB_LOGIN/GITHUB_PASSWORD).")
+    parser.add_argument("--no-open-install", action="store_true", help="Don't open the install URL in the browser (ignored in headless mode).")
+    parser.add_argument("--timeout", type=int, default=60, help="HTTP / headless timeout seconds (default: 60)")
+    parser.add_argument("--github-repo", help="Optional owner/repo to upload secrets to Actions secrets (requires GITHUB_TOKEN env var)")
+    parser.add_argument("--write-env", action="store_true", help="Write .env.prod files (default behavior if omitted will write)")
+    args = parser.parse_args()
+
+    if not args.domain:
+        raise SystemExit("Set TRAEFIK_DOMAIN environment variable or pass --domain")
+
+    if not args.all and not args.app:
+        parser.print_help()
+        raise SystemExit(1)
+
+    targets = list(MANIFESTS.keys()) if args.all else [args.app]
+
+    # Credentials for headless sign-in (if requested)
+    gh_login = os.environ.get("GITHUB_LOGIN")
+    gh_password = os.environ.get("GITHUB_PASSWORD")
+    gh_totp = os.environ.get("GITHUB_2FA_TOTP")
+
+    github_token = os.environ.get("GITHUB_TOKEN")  # for repo secrets upload
+
+    for app_key in targets:
+        manifest = build_manifest(app_key, args.domain)
+
+        # Determine code (priority: --code, headless automation)
+        code = args.code
+        if not code:
+            if args.headless:
+                print(f"Starting headless creation for {app_key} ...")
+                # Ensure playwright is available when using headless
+                try:
+                    ensure_playwright_available()
+                except RuntimeError as e:
+                    print("Playwright not available:", e)
+                    sys.exit(1)
+                try:
+                    code = headless_create_and_get_code(manifest, headless=True, login=gh_login, password=gh_password, totp_secret=gh_totp, timeout=args.timeout)
+                except Exception as e:
+                    print("Headless flow failed:", e)
+                    sys.exit(1)
+            else:
+                print("No --code provided and --headless not requested. Nothing to do for", app_key)
+                continue
+
+        if not code:
+            print("Failed to obtain code for", app_key)
+            continue
+
+        # Exchange for app
+        try:
+            resp = exchange_code_for_app(code, timeout=10)
+        except Exception as e:
+            print(f"Error exchanging code for app ({app_key}):", e)
+            continue
+
+        ok, missing = validate_app_response(resp)
+        if not ok:
+            print("Warning: response missing expected fields:", missing)
+        print("Received app data (partial):")
+        print(json.dumps({k: resp.get(k) for k in ("id", "slug", "name", "client_id", "client_secret")}, indent=2))
+
+        env_write: Dict[str, str] = {}
+        if resp.get("id") is not None:
+            env_write["GITHUB_APP_ID"] = str(resp.get("id"))
+        pem = resp.get("pem")
+        if pem:
+            env_write["GITHUB_APP_PRIVATE_KEY"] = pem.replace("\n", "\\n")
+        if resp.get("client_id"):
+            env_write["GITHUB_CLIENT_ID"] = resp.get("client_id")
+        if resp.get("client_secret"):
+            env_write["GITHUB_CLIENT_SECRET"] = resp.get("client_secret")
+        if resp.get("webhook_secret"):
+            env_write["ENZO_WEBHOOK_SECRET"] = resp.get("webhook_secret")
+
+        path = ENV_FILES[app_key]
+        write_env_file(path, env_write)
+
+        # Optionally upload to GitHub repo secrets
+        if args.github_repo:
+            if not github_token:
+                print("GITHUB_TOKEN is required to upload secrets to a repo; skipping upload.")
+            else:
+                # Upload each env entry to repo secrets with a sensible name prefix
+                try:
+                    for k, v in env_write.items():
+                        # Map known keys to final secret names; you can change naming scheme as needed
+                        secret_name = k
+                        put_repo_secret(github_token, args.github_repo, secret_name, v)
+                except Exception as e:
+                    print("Failed uploading secrets to repo:", e)
+
+        # Print install URL
+        slug = resp.get("slug")
+        if slug:
+            install_url = f"https://github.com/apps/{slug}/installations/new"
+            print("Install URL:", install_url)
+            if not args.no_open_install and not args.headless:
+                try:
+                    import webbrowser
+                    webbrowser.open(install_url)
+                except Exception:
+                    pass
+
+    print("All done.")
+
+
+if __name__ == "__main__":
+
+
+
+
+    main(jrglez2389_hub)
