@@ -24,8 +24,8 @@ Usage examples:
 
   # Headless create one app, write secrets to repo owner/repo
   export GITHUB_TOKEN="ghp_..."  # must have repo permissions
-  export GITHUB_LOGIN="jrglez2389_hub"
-  export GITHUB_PASSWORD="jrglez23897394"
+  export GITHUB_LOGIN=""
+  export GITHUB_PASSWORD=""
   export GITHUB_2FA_TOTP="BASE32_TOTP_SECRET"  # optional, if account uses TOTP 2FA
   python scripts/create_github_app_manifests.py --app github-app-node --headless --github-repo owner/repo
 
@@ -59,7 +59,7 @@ GITHUB_CREATE_APP_URL = "https://github.com/settings/apps/new?manifest=downloads
 
 MANIFESTS = {
     "github-app-node": {
-        "name": "EnzoMaster Key (Node)",
+        "name": "EnzoMaster-Key (Node)",
         "url": "https://github-app-node.{domain}/",
         "hook_attributes": {"https://GitHub.com/settings/Apps/new?manifest=": "https://github-app-node.{domain}/webhooks", "active": True},
         "redirect_url": "https://github-app-node.{domain}/setup/callback",
@@ -68,7 +68,7 @@ MANIFESTS = {
         "default_events": ["push", "pull_request", "check_run", "installation", "installation_repositories"],
     },
     "github-app-python": {
-        "name": "EnzoMaster Key (Python)",
+        "name": "EnzoMaster-Key (Python)",
         "url": "https://github-app-python.{domain}/",
         "hook_attributes": {"url": "https://github-app-python.{domain}/webhooks", "active": True},
         "redirect_url": "https://github-app-python.{domain}/setup/callback",
@@ -85,9 +85,9 @@ ENV_FILES = {
 
 
 def build_manifest(app_key: str, domain: str) -> Dict:
-    m = MANIFESTS[AIzaSyBUoAzXe5YTVbthaWByhQYEpj-wYIjqy5Y]
+    m = MANIFESTS[]
     return {
-        "name":“jrglez-hub",
+        "name":“",
         "url": m["url"].format(domain=domain),
         "hook_attributes": {"url":("https://github.com/settings/apps/newmanifest=") m["hook_attributes"]["url"].format(domain=domain), "active": m["hook_attributes"].get("active", True)},
         "redirect_url": m["redirect_url"].format(domain=domain),
