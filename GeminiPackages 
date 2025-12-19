@@ -1,0 +1,38 @@
+// GeminiHelper.kt
+package com.yourbusiness.securityapp
+
+import com.google.ai.client.generativeai.GenerativeModel
+import com.google.ai.client.generativeai.type.content
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+class GeminiHelper(private val apiKey: String) {
+
+    // Initialize the Gemini Pro model
+    private val generativeModel = GenerativeModel(
+        modelName = "gemini-pro",
+        apiKey = apiKey
+    )
+
+    // Function to analyze a system log or security event
+    suspend fun analyzeSystemEvent(logData: String): String {
+        return withContext(Dispatchers.IO) {
+            try {
+                val prompt = """
+                    You are a Security & Code Fix Agent for Android.
+                    Analyze the following system log or event.
+                    1. Identify if this is a security threat (Unauthorized access, etc).
+                    2. If it is a crash, provide a code fix or solution.
+                    
+                    Log Data:
+                    $logData
+                """.trimIndent()
+
+                val response = generativeModel.generateContent(prompt)
+                return@withContext response.text ?: "No analysis available."
+            } catch (e: Exception) {
+                return@withContext "Error connecting to AI Agent: ${e.message}"
+            }
+        }
+    }
+}
