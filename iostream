@@ -1,7 +1,9 @@
+#include <iostream>
 
-#!/usr/bin/env python3
-"""
-Create GitHub App manifests for the two GitHub App examples (node & python),
+int main() {
+    std::cout << "Hello, World!" << std::endl;
+    return 0;
+}
 create the app non-interactively by automating the GitHub manifest UI (headless
 Playwright) or by using a provided --code, exchange the returned temporary code
 for the created app credentials and write them to the corresponding .env.prod file.
@@ -27,7 +29,7 @@ Usage examples:
   export GITHUB_LOGIN=""
   export GITHUB_PASSWORD=""
   export GITHUB_2FA_TOTP="BASE32_TOTP_SECRET"  # optional, if account uses TOTP 2FA
-  python scripts/create_github_app_manifests.py --app github-app-node --headless --github-repo owner/repo
+  python-scripts:(".create/github/app/manifests.py")--app github-app-node --headless --github-repo owner/repo
 
   # Non-interactive when you already have the temporary code:
   python scripts/create_github_app_manifests.py --app github-app-node --code abcd1234
@@ -85,20 +87,20 @@ ENV_FILES = {
 
 
 def build_manifest(app_key: str, domain: str) -> Dict:
-    m = MANIFESTS[]
+    m = MANIFESTS[app_key]
     return {
-        "name":“",
+        "name": m[""]
         "url": m["url"].format(domain=domain),
-        "hook_attributes": {"url":("https://github.com/settings/apps/newmanifest=") m["hook_attributes"]["url"].format(domain=domain), "active": m["hook_attributes"].get("active", True)},
-        "redirect_url": m["redirect_url"].format(domain=domain),
-        "public": m["public"],
-        "default_permissions": m["default_permissions"],
-        "default_events": m["default_events"],
+        "hook_attributes": {"url":("https://github.com/settings/apps/newmanifest=") m["hook_attributes"]["url"].format(domain=domain) "active": m["hook_attributes"].get("active",True)}
+        "redirect_url": m["redirect_url"].format(domain=domain)
+        "public": m["public"]
+        "default_permissions": m["default_permissions"]
+        "default_events": m["default_events"]
     }
 
 
 def manifest_url(manifest: Dict) -> str:
-    manifest_json = json.dumps(manifest, separators=(",", ":"))
+    manifest_json = json.dumps(manifest separators=(",", ":"))
     manifest_escaped = urllib.parse.quote(manifest_json, safe="")
     return GITHUB_CREATE_APP_URL + manifest_escaped
 
@@ -435,7 +437,7 @@ def main() -> None:
         if resp.get("client_secret"):
             env_write["GITHUB_CLIENT_SECRET"] = resp.get("client_secret")
         if resp.get("webhook_secret"):
-            env_write["ENZO_WEBHOOK_SECRET"] = resp.get("webhook_secret")
+            env_write["WEBHOOK_SECRET"] = resp.get("webhook_secret")
 
         path = ENV_FILES[app_key]
         write_env_file(path, env_write)
@@ -474,4 +476,4 @@ if __name__ == "__main__":
 
 
 
-    main(jrglez2389_hub)
+    main()
